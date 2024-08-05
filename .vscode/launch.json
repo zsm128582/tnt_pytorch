@@ -1,0 +1,64 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "tnt-train",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "/home/zengshimao/code/Efficient-AI-Backbones-master/tnt_pytorch/train.py",
+            "console": "integratedTerminal",
+            "args": [
+                "/path/to/imagenet/",
+                "--model",
+                "tnt_s_patch16_224",
+                "--sched",
+                "cosine",
+                "--epochs",
+                "300",
+                "--opt",
+                "adamw",
+                "-j",
+                "8",
+                "--warmup-lr",
+                "1e-6",
+                "--mixup",
+                ".8",
+                "--cutmix",
+                "1.0",
+                "--model-ema",
+                "--model-ema-decay",
+                "0.99996",
+                "--aa",
+                "rand-m9-mstd0.5-inc1",
+                "--color-jitter",
+                "0.4",
+                "--warmup-epochs",
+                "5",
+                "--opt-eps",
+                "1e-8",
+                "--repeated-aug",
+                "--remode",
+                "pixel",
+                "--reprob",
+                "0.25",
+                "--amp",
+                "--lr",
+                "1e-3",
+                "--weight-decay",
+                ".05",
+                "--drop",
+                "0",
+                "--drop-path",
+                ".1",
+                "-b",
+                "128",
+                "--output",
+                "/home/zengshimao/code/Efficient-AI-Backbones-master/tnt_pytorch/save/"
+
+            ]
+        }
+    ]
+}
