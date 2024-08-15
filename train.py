@@ -361,54 +361,10 @@ def main():
         assert args.aug_splits > 1, 'A split of 1 makes no sense'
         num_aug_splits = args.aug_splits
 
-    # if args.split_bn:
-    #     assert num_aug_splits > 1 or args.resplit
-    #     model = convert_splitbn_model(model, max(num_aug_splits, 2))
-
-    # use_amp = None
-    # if args.amp:
-    #     # for backwards compat, `--amp` arg tries apex before native amp
-    #     if has_apex:
-    #         args.apex_amp = True
-    #     elif has_native_amp:
-    #         args.native_amp = True
-    # if args.apex_amp and has_apex:
-    #     use_amp = 'apex'
-    # elif args.native_amp and has_native_amp:
-    #     use_amp = 'native'
-    # elif args.apex_amp or args.native_amp:
-    #     _logger.warning("Neither APEX or native Torch AMP is available, using float32. "
-    #                     "Install NVIDA apex or upgrade to PyTorch 1.6")
-
-    # if args.num_gpu > 1:
-    #     if use_amp == 'apex':
-    #         _logger.warning(
-    #             'Apex AMP does not work well with nn.DataParallel, disabling. Use DDP or Torch AMP.')
-    #         use_amp = None
-    #     model = nn.DataParallel(model, device_ids=list(range(args.num_gpu))).cuda()
-    #     assert not args.channels_last, "Channels last not supported with DP, use DDP."
-    # else:
-    #     model.cuda()
-    #     if args.channels_last:
-    #         model = model.to(memory_format=torch.channels_last)
-
     optimizer = create_optimizer(args, model)
 
     amp_autocast = suppress  # do nothing
     loss_scaler = None
-    # if use_amp == 'apex':
-    #     model, optimizer = amp.initialize(model, optimizer, opt_level='O1')
-    #     loss_scaler = ApexScaler()
-    #     if args.local_rank == 0:
-    #         _logger.info('Using NVIDIA APEX AMP. Training in mixed precision.')
-    # elif use_amp == 'native':
-    #     amp_autocast = torch.cuda.amp.autocast
-    #     loss_scaler = NativeScaler()
-    #     if args.local_rank == 0:
-    #         _logger.info('Using native Torch AMP. Training in mixed precision.')
-    # else:
-    #     if args.local_rank == 0:
-    #         _logger.info('AMP not enabled. Training in float32.')
 
     # optionally resume from a checkpoint
     resume_epoch = None
@@ -428,34 +384,9 @@ def main():
             device='cpu' if args.model_ema_force_cpu else '',
             resume=args.resume)
 
-    # if args.distributed:
-    #     if args.sync_bn:
-    #         assert not args.split_bn
-    #         try:
-    #             if has_apex and use_amp != 'native':
-    #                 # Apex SyncBN preferred unless native amp is activated
-    #                 model = convert_syncbn_model(model)
-    #             else:
-    #                 model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    #             if args.local_rank == 0:
-    #                 _logger.info(
-    #                     'Converted model to use Synchronized BatchNorm. WARNING: You may have issues if using '
-    #                     'zero initialized BN layers (enabled by default for ResNets) while sync-bn enabled.')
-    #         except Exception as e:
-    #             _logger.error('Failed to enable Synchronized BatchNorm. Install Apex or Torch >= 1.1')
-    #     if has_apex and use_amp != 'native':
-    #         # Apex DDP preferred unless native amp is activated
-    #         if args.local_rank == 0:
-    #             _logger.info("Using NVIDIA APEX DistributedDataParallel.")
-    #         model = ApexDDP(model, delay_allreduce=True)
-    #     else:
-    #         if args.local_rank == 0:
-    #             _logger.info("Using native Torch DistributedDataParallel.")
-    #         model = NativeDDP(model, device_ids=[args.local_rank])  # can use device str in Torch >= 1.1
-    #     # NOTE: EMA model does not need to be wrapped by DDP
-
     lr_scheduler, num_epochs = create_scheduler(args, optimizer)
     start_epoch = 0
+
     if args.start_epoch is not None:
         # a specified start_epoch will always override the resume epoch
         start_epoch = args.start_epoch
@@ -464,28 +395,22 @@ def main():
     if lr_scheduler is not None and start_epoch > 0:
         lr_scheduler.step(start_epoch)
 
-    if args.local_rank == 0:
-        _logger.info('Scheduled epochs: {}'.format(num_epochs))
 
-    # train_dir = os.path.join(args.data, 'train')
+    _logger.info('Scheduled epochs: {}'.format(num_epochs))
+
     train_dir = "/home/zengshimao/code/Super-Resolution-Neural-Operator/data/validation"
     if not os.path.exists(train_dir):
         _logger.error('Training folder does not exist at: {}'.format(train_dir))
         exit(1)
 
-    # eval_dir = os.path.join(args.data, 'val')
-    # if not os.path.isdir(eval_dir):
-    #     eval_dir = os.path.join(args.data, 'validation')
-    #     if not os.path.isdir(eval_dir):
-    #         _logger.error('Validation folder does not exist at: {}'.format(eval_dir))
-    #         exit(1)
     lable_path = '/home/zengshimao/code/Super-Resolution-Neural-Operator/test/ILSVRC2012_validation_ground_truth.txt'
 
 
     augmentConfig = {
         "input_size" : 224,
         "color_jitter" : None,
-        "auto_augment" : "rand-m9-mstd0.5-inc1",
+        # "auto_augment" : "rand-m9-mstd0.5-inc1",
+        "auto_augment" : None,
         "reprob" : 0 ,
         "remode" : "pixel" ,
         "recount" : 1
@@ -493,76 +418,9 @@ def main():
     loader_train,loader_eval = make_data_loaders(train_dir, lable_path,32,8,augmentConfig)
 
 
-    
-    # dataset_train = Dataset(train_dir)
-
     collate_fn = None
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
-    # if mixup_active:
-    #     mixup_args = dict(
-    #         mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
-    #         prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
-    #         label_smoothing=args.smoothing, num_classes=args.num_classes)
-    #     if args.prefetcher:
-    #         assert not num_aug_splits  # collate conflict (need to support deinterleaving in collate mixup)
-    #         collate_fn = FastCollateMixup(**mixup_args)
-    #     else:
-    #         mixup_fn = Mixup(**mixup_args)
-
-    # if num_aug_splits > 1:
-    #     dataset_train = AugMixDataset(dataset_train, num_splits=num_aug_splits)
-
-    # train_interpolation = args.train_interpolation
-    # if args.no_aug or not train_interpolation:
-    #     train_interpolation = data_config['interpolation']
-    # loader_train = create_loader(
-    #     dataset_train,
-    #     input_size=data_config['input_size'],
-    #     batch_size=args.batch_size,
-    #     is_training=True,
-    #     use_prefetcher=args.prefetcher,
-    #     no_aug=args.no_aug,
-    #     re_prob=args.reprob,
-    #     re_mode=args.remode,
-    #     re_count=args.recount,
-    #     re_split=args.resplit,
-    #     scale=args.scale,
-    #     ratio=args.ratio,
-    #     hflip=args.hflip,
-    #     vflip=args.vflip,
-    #     color_jitter=args.color_jitter,
-    #     auto_augment=args.aa,
-    #     num_aug_splits=num_aug_splits,
-    #     interpolation=train_interpolation,
-    #     mean=data_config['mean'],
-    #     std=data_config['std'],
-    #     num_workers=args.workers,
-    #     distributed=args.distributed,
-    #     collate_fn=collate_fn,
-    #     pin_memory=args.pin_mem,
-    #     use_multi_epochs_loader=args.use_multi_epochs_loader,
-    #     repeated_aug=args.repeated_aug
-    # )
-
-
-
-    # dataset_eval = Dataset(eval_dir)
-
-    # loader_eval = create_loader(
-    #     dataset_eval,
-    #     input_size=data_config['input_size'],
-    #     batch_size=args.validation_batch_size_multiplier * args.batch_size,
-    #     is_training=False,
-    #     use_prefetcher=args.prefetcher,
-    #     interpolation=data_config['interpolation'],
-    #     mean=data_config['mean'],
-    #     std=data_config['std'],
-    #     num_workers=args.workers,
-    #     distributed=args.distributed,
-    #     crop_pct=data_config['crop_pct'],
-    #     pin_memory=args.pin_mem,
-    # )
 
     if args.jsd:
         assert num_aug_splits > 1  # JSD only valid with aug splits set
@@ -586,26 +444,24 @@ def main():
     best_epoch = None
     saver = None
     output_dir = ''
-    if args.local_rank == 0:
-        output_base = args.output if args.output else './output'
-        exp_name = '-'.join([
-            datetime.now().strftime("%Y%m%d-%H%M%S"),
-            args.model,
-            str(data_config['input_size'][-1])
-        ])
-        output_dir = get_outdir(output_base, 'train', exp_name)
-        decreasing = True if eval_metric == 'loss' else False
-        saver = CheckpointSaver(
-            model=model, optimizer=optimizer, args=args, model_ema=model_ema, amp_scaler=loss_scaler,
-            checkpoint_dir=output_dir, recovery_dir=output_dir, decreasing=decreasing)
-        with open(os.path.join(output_dir, 'args.yaml'), 'w') as f:
-            f.write(args_text)
+
+    output_base = args.output if args.output else './output'
+    exp_name = '-'.join([
+        datetime.now().strftime("%Y%m%d-%H%M%S"),
+        args.model,
+        str(data_config['input_size'][-1])
+    ])
+    output_dir = get_outdir(output_base, 'train', exp_name)
+    decreasing = True if eval_metric == 'loss' else False
+    saver = CheckpointSaver(
+        model=model, optimizer=optimizer, args=args, model_ema=model_ema, amp_scaler=loss_scaler,
+        checkpoint_dir=output_dir, recovery_dir=output_dir, decreasing=decreasing)
+    with open(os.path.join(output_dir, 'args.yaml'), 'w') as f:
+        f.write(args_text)
 
     n_gpus = len(os.environ['CUDA_VISIBLE_DEVICES'].split(','))
     if n_gpus > 1:
         model = nn.parallel.DataParallel(model)
-
-
     try:
         for epoch in range(start_epoch, num_epochs):
             # if args.distributed:
@@ -640,7 +496,7 @@ def train(train_loader, model, optimizer, \
 
     
     model.train()
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = nn.CrossEntropyLoss().cuda()
     train_loss = AverageMeter()
 
     iteration = 0
@@ -673,93 +529,6 @@ def train(train_loader, model, optimizer, \
         pbar.set_description('train loss: {:.4f}, lr: {:.6f}'.format(train_loss.avg,optimizer.param_groups[0]['lr'] ))
 
     return OrderedDict([('loss', train_loss.avg)])
-
-
-# def train_epoch(
-#         epoch, model, loader, optimizer, loss_fn, args,
-#         lr_scheduler=None, saver=None, output_dir='', amp_autocast=suppress,
-#         loss_scaler=None, model_ema=None, mixup_fn=None):
-
-#     if args.mixup_off_epoch and epoch >= args.mixup_off_epoch:
-#         if args.prefetcher and loader.mixup_enabled:
-#             loader.mixup_enabled = False
-#         elif mixup_fn is not None:
-#             mixup_fn.mixup_enabled = False
-
-#     second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-#     loss_fn = nn.CrossEntropyLoss()
-#     batch_time_m = AverageMeter()
-#     data_time_m = AverageMeter()
-#     losses_m = AverageMeter()
-
-#     model.train()
-
-#     end = time.time()
-#     last_idx = len(loader) - 1
-#     num_updates = epoch * len(loader)
-#     for batch_idx, batch in enumerate(loader):
-#         for k,v in batch.items():
-#             batch[k] = v.cuda(non_blocking=True)
-        
-#         input = batch["img"]
-#         target = batch['gt']
-#         last_batch = batch_idx == last_idx
-#         data_time_m.update(time.time() - end)
-#         # if not args.prefetcher:
-#         #     input, target = input.cuda(), target.cuda()
-#         #     if mixup_fn is not None:
-#         #         input, target = mixup_fn(input, target)
-#         if args.channels_last:
-#             input = input.contiguous(memory_format=torch.channels_last)
-
-#         with amp_autocast():
-#             output = model(input)
-#             loss = loss_fn(output, target)
-
-
-#         losses_m.update(loss.item(), input.size(0))
-
-#         optimizer.zero_grad()
-#         if loss_scaler is not None:
-#             loss_scaler(
-#                 loss, optimizer, clip_grad=args.clip_grad, parameters=model.parameters(), create_graph=second_order)
-#         else:
-#             loss.backward(create_graph=second_order)
-#             if args.clip_grad is not None:
-#                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
-#             optimizer.step()
-
-#         torch.cuda.synchronize()
-#         if model_ema is not None:
-#             model_ema.update(model)
-#         num_updates += 1
-
-#         batch_time_m.update(time.time() - end)
-#         if last_batch or batch_idx % args.log_interval == 0:
-#             lrl = [param_group['lr'] for param_group in optimizer.param_groups]
-#             lr = sum(lrl) / len(lrl)
-
-#             if args.save_images and output_dir:
-#                 torchvision.utils.save_image(
-#                     input,
-#                     os.path.join(output_dir, 'train-batch-%d.jpg' % batch_idx),
-#                     padding=0,
-#                     normalize=True)
-
-#         if saver is not None and args.recovery_interval and (
-#                 last_batch or (batch_idx + 1) % args.recovery_interval == 0):
-#             saver.save_recovery(epoch, batch_idx=batch_idx)
-
-#         if lr_scheduler is not None:
-#             lr_scheduler.step_update(num_updates=num_updates, metric=losses_m.avg)
-
-#         end = time.time()
-#         # end for
-
-#     if hasattr(optimizer, 'sync_lookahead'):
-#         optimizer.sync_lookahead()
-
-#     return OrderedDict([('loss', losses_m.avg)])
 
 
 def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix=''):

@@ -33,6 +33,8 @@ from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from timm.models.resnet import resnet26d, resnet50d
 from timm.models.registry import register_model
 from SimpleGalerkin import SelfAttention
+from pos_embed import get_2d_sincos_pos_embed
+from edsr import make_edsr_baseline
 
 def _cfg(url='', **kwargs):
     return {
@@ -149,10 +151,11 @@ class Block(nn.Module):
 
             # Inner
             self.inner_norm1 = norm_layer(inner_dim)
+            # self.inner_attn = SelfAttention(n_feats=inner_dim)
             self.inner_attn = Attention(
                 inner_dim, inner_dim, num_heads=inner_num_heads, qkv_bias=qkv_bias,
                 qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
-            # self.inner_attn = SelfAttention(n_feats=inner_dim)
+            self.inner_attn = SelfAttention(n_feats=inner_dim)
             self.inner_norm2 = norm_layer(inner_dim)
             self.inner_mlp = Mlp(in_features=inner_dim, hidden_features=int(inner_dim * mlp_ratio),
                                  out_features=inner_dim, act_layer=act_layer, drop=drop)
@@ -206,7 +209,6 @@ class PatchEmbed(nn.Module):
         self.num_patches = num_patches
         self.inner_dim = inner_dim
         self.num_words = math.ceil(patch_size[0] / inner_stride) * math.ceil(patch_size[1] / inner_stride)
-        
         self.unfold = nn.Unfold(kernel_size=patch_size, stride=patch_size)
         self.proj = nn.Conv2d(in_chans, inner_dim, kernel_size=7, padding=3, stride=inner_stride)
 
@@ -215,6 +217,9 @@ class PatchEmbed(nn.Module):
         # FIXME look at relaxing size constraints
         assert H == self.img_size[0] and W == self.img_size[1], \
             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+        
+        
+        
         x = self.unfold(x) # B, Ck2, N
         x = x.transpose(1, 2).reshape(B * self.num_patches, C, *self.patch_size) # B*N, C, 16, 16
         x = self.proj(x) # B*N, C, 8, 8
@@ -229,23 +234,36 @@ class TNT(nn.Module):
                  depth=12, outer_num_heads=12, inner_num_heads=4, mlp_ratio=4., qkv_bias=False, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., norm_layer=nn.LayerNorm, inner_stride=4, se=0):
         super().__init__()
+        # # 这里改一下改成我自己的patchembed
+        inner_stride = 1 
+        inner_dim = 8
+        self.mask_ratio = 0.5
+        in_chans = 16
+        
         self.num_classes = num_classes
         self.num_features = self.outer_dim = outer_dim  # num_features for consistency with other models
+
+        self.edsr_Head = make_edsr_baseline(n_feats=in_chans,no_upsampling=True)
 
         self.patch_embed = PatchEmbed(
             img_size=img_size, patch_size=patch_size, in_chans=in_chans, outer_dim=outer_dim,
             inner_dim=inner_dim, inner_stride=inner_stride)
         self.num_patches = num_patches = self.patch_embed.num_patches
-        num_words = self.patch_embed.num_words
+        num_words =  int(self.patch_embed.num_words * self.mask_ratio)
         
-        self.proj_norm1 = norm_layer(num_words * inner_dim)
-        self.proj = nn.Linear(num_words * inner_dim, outer_dim)
+        
+        self.proj_norm1 = norm_layer(num_words  * inner_dim)
+        self.proj = nn.Linear(num_words  * inner_dim, outer_dim)
         self.proj_norm2 = norm_layer(outer_dim)
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, outer_dim))
         self.outer_tokens = nn.Parameter(torch.zeros(1, num_patches, outer_dim), requires_grad=False)
         self.outer_pos = nn.Parameter(torch.zeros(1, num_patches + 1, outer_dim))
-        self.inner_pos = nn.Parameter(torch.zeros(1, num_words, inner_dim))
+        self.inner_pos = nn.Parameter(torch.zeros(1, int(num_words / self.mask_ratio), inner_dim),requires_grad=False) 
+        pos_embed = get_2d_sincos_pos_embed(
+                self.inner_pos.shape[-1], int(math.sqrt( num_words / self.mask_ratio)), cls_token=False
+            )
+        self.inner_pos.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
         self.pos_drop = nn.Dropout(p=drop_rate)
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
@@ -274,8 +292,9 @@ class TNT(nn.Module):
 
         trunc_normal_(self.cls_token, std=.02)
         trunc_normal_(self.outer_pos, std=.02)
-        trunc_normal_(self.inner_pos, std=.02)
+        # trunc_normal_(self.inner_pos, std=.02)
         self.apply(self._init_weights)
+
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -297,11 +316,43 @@ class TNT(nn.Module):
         self.num_classes = num_classes
         self.head = nn.Linear(self.outer_dim, num_classes) if num_classes > 0 else nn.Identity()
 
+    def random_masking(self, x, mask_ratio):
+        """
+        Perform per-sample random masking by per-sample shuffling.
+        Per-sample shuffling is done by argsort random noise.
+        x: [N, L, D], sequence
+        """
+        N, L, D = x.shape  # batch, length, dim
+        len_keep = int(L * (1 - mask_ratio))
+
+        noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
+
+        # sort noise for each sample
+        # argsort 返回的是索引值
+        ids_shuffle = torch.argsort(
+            noise, dim=1
+        )  # ascend: small is keep, large is remove
+        ids_restore = torch.argsort(ids_shuffle, dim=1)
+
+        # keep the first subset
+        ids_keep = ids_shuffle[:, :len_keep]
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+
+        # generate the binary mask: 0 is keep, 1 is remove
+        mask = torch.ones([N, L], device=x.device)
+        mask[:, :len_keep] = 0
+        # unshuffle to get the binary mask
+        mask = torch.gather(mask, dim=1, index=ids_restore)
+
+        return x_masked, mask, ids_restore
     def forward_features(self, x):
         # bchw
         B = x.shape[0]
+        x = self.edsr_Head(x)
         # 
-        inner_tokens = self.patch_embed(x) + self.inner_pos # B*N, 8*8, C
+        inner_tokens = self.patch_embed(x)+self.inner_pos # B*N, 8*8, C
+
+        inner_tokens, mask, id_restore = self.random_masking(inner_tokens,0.5)
         # b ,  n , 8*8*c - > 768
         outer_tokens = self.proj_norm2(self.proj(self.proj_norm1(inner_tokens.reshape(B, self.num_patches, -1))))        
         outer_tokens = torch.cat((self.cls_token.expand(B, -1, -1), outer_tokens), dim=1)
